@@ -215,6 +215,8 @@ set_op_from_json({Verb, BinList}=Op) when is_list(BinList), (Verb == <<"add_all"
         false ->
             bad_op(set, Op)
     end;
+set_op_from_json({<<"update">>, {struct, Ops}}) when is_list(Ops) ->
+    {update, [ set_op_from_json(Op) || Op <- Ops]};
 set_op_from_json({<<"update">>, Ops}) when is_list(Ops) ->
     {update, [ set_op_from_json(Op) || Op <- Ops]};
 set_op_from_json(Op) -> bad_op(set, Op).
