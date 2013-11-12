@@ -190,8 +190,19 @@ is_authorized(ReqData, Ctx) ->
                               ReqData, Ctx)
     end.
 
+malformed_request(RD, Ctx=#ctx{method='POST'}) ->
+    malformed_check_post_ctype(RD, Ctx);
 malformed_request(RD, Ctx) ->
     malformed_rw_params(RD, Ctx).
+
+malformed_check_post_ctype(RD, Ctx) ->
+    CType = wrq:get_req_header(?HEAD_CTYPE, RD),
+    case mochiweb_util:parse_header(CType) of
+        {"application/json",_} ->
+            malformed_rw_params(RD, Ctx);
+        _Other ->
+            {{halt, 406}, RD, Ctx}
+    end.
 
 malformed_rw_params(RD, Ctx) ->
     Res = lists:foldl(fun malformed_rw_param/2,
