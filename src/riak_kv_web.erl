@@ -120,7 +120,7 @@ raw_dispatch(Name) ->
 
 is_crdt_type(Req) ->
     ReqType = orddict:fetch(crdt, wrq:path_info(Req)),
-    lists:member(?TOP_LEVEL_TYPES, riak_kv_crdt:to_mod(ReqType)).
+    lists:member(riak_kv_crdt:to_mod(ReqType), ?TOP_LEVEL_TYPES).
 
 is_post(Req) ->
     wrq:method(Req) == 'POST'.

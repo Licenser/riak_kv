@@ -59,7 +59,7 @@
 fetch_response_to_json(Type, Value, Context, Mods) ->
     {struct, [{<<"type">>, atom_to_binary(Type, utf8)},
               {<<"value">>, value_to_json(Type, Value, Mods)}] ++
-         [ {<<"context">>, base64:encode(Context)} || Context /= undefined ]}.
+         [ {<<"context">>, base64:encode(Context)} || Context /= undefined, Context /= <<>> ]}.
 
 %% @doc Decodes a JSON value into an update operation.
 -spec update_request_from_json(toplevel_type(), mochijson2:json_term(), type_mappings()) -> update().
@@ -244,6 +244,9 @@ encode_fetch_response_test_() ->
                                      {<<"value">>, 5}]},
                            fetch_response_to_json(counter, ?COUNTER_TYPE:value(Counter), undefined, ?MOD_MAP))
 
+              ?assertEqual({struct, [{<<"type">>,<<"counter">>},
+                                     {<<"value">>, 5}]},
+                           fetch_response_to_json(counter, ?COUNTER_TYPE:value(Counter), <<>>, ?MOD_MAP))
       end},
      {"encode set",
       fun() ->

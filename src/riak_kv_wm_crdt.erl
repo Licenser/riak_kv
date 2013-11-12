@@ -190,6 +190,69 @@ is_authorized(ReqData, Ctx) ->
                               ReqData, Ctx)
     end.
 
+malformed_request(RD, Ctx) ->
+    malformed_rw_params(RD, Ctx).
+
+malformed_rw_params(RD, Ctx) ->
+    Res = lists:foldl(fun malformed_rw_param/2,
+                      {false, RD, Ctx},
+                      [{#ctx.r,  "r",  "default"},
+                       {#ctx.w,  "w",  "default"},
+                       {#ctx.dw, "dw", "default"},
+                       {#ctx.pw, "pw", "default"},
+                       {#ctx.pr, "pr", "default"}]),
+    Res1 = lists:foldl(fun malformed_boolean_param/2,
+                       Res,
+                       [{#ctx.basic_quorum,    "basic_quorum",    "default"},
+                        {#ctx.notfound_ok,     "notfound_ok",     "default"},
+                        {#ctx.include_context, "include_context", "true"},
+                        {#ctx.returnbody,      "returnbody",      "false"}]),
+    malformed_timeout_param(Res1).
+
+malformed_rw_param({Idx, Name, Default}, {Result, RD, Ctx}) ->
+    case catch normalize_rw_param(wrq:get_qs_value(Name, Default, RD)) of
+        P when (is_atom(P) orelse is_integer(P)) ->
+            {Result, RD, setelement(Idx, Ctx, P)};
+        _ ->
+            {true,
+             error_response("~s query parameter must be an integer or "
+                            "one of the following words: 'one', 'quorum' or 'all'~n",
+                            [Name], RD),
+             Ctx}
+    end.
+
+malformed_boolean_param({Idx, Name, Default}, {Result, RD, Ctx}) ->
+    case string:to_lower(wrq:get_qs_value(Name, Default, RD)) of
+        "true" ->
+            {Result, RD, setelement(Idx, Ctx, true)};
+        "false" ->
+            {Result, RD, setelement(Idx, Ctx, false)};
+        "default" ->
+            {Result, RD, setelement(Idx, Ctx, default)};
+        _ ->
+            {true,
+             error_response("~s query parameter must be true or false~n",
+                            [Name], RD),
+             Ctx}
+    end.
+
+malformed_timeout_param({Result, RD, Ctx}) ->
+    case wrq:get_qs_value("timeout", undefined, RD) of
+        undefined ->
+            {Result, RD, Ctx};
+        TimeoutStr when is_list(TimeoutStr) ->
+            try
+                Timeout = list_to_integer(TimeoutStr),
+                {Result, RD, Ctx#ctx{timeout=Timeout}}
+            catch
+                error:badarg ->
+                    {true,
+                     error_response("timeout query parameter must be an "
+                                    "integer, ~s is invalid~n", [TimeoutStr], RD),
+                     Ctx}
+            end
+    end.
+
 forbidden(RD, Ctx) ->
     case riak_kv_wm_utils:is_forbidden(RD) of
         true ->
@@ -199,7 +262,7 @@ forbidden(RD, Ctx) ->
     end.
 
 forbidden_check_security(RD, Ctx=#ctx{security=undefined}) ->
-    {false, RD, Ctx};
+    forbidden_check_bucket_type(RD, Ctx);
 forbidden_check_security(RD, Ctx=#ctx{bucket_type=BType, bucket=Bucket,
                                       security=SecContext, method=Method}) ->
     Perm = permission(Method),
@@ -264,96 +327,6 @@ forbidden_check_crdt_type(RD, Ctx=#ctx{bucket_type=T, bucket=B, crdt_type=C}) ->
             handle_common_error(bucket_type_unknown, RD, Ctx)
     end.
 
-malformed_request(RD, Ctx=#ctx{method='POST', module=Mod}) ->
-    CRDTType = riak_kv_crdt:from_mod(Mod),
-    try
-        JSON = mochijson2:decode(wrq:req_body(RD)),
-        Data = {CRDTType, Op, Context} =
-            riak_kv_crdt_json:update_request_from_json(CRDTType, JSON,
-                                                       ?MOD_MAP),
-        malformed_rw_params(RD, Ctx#ctx{data=Data})
-    catch
-        throw:{invalid_operation, {BadType, BadOp}} ->
-            {true,
-             error_response("Invalid operation on datatype '~s': ~s~n",
-                            [BadType, mochijson2:encode(BadOp)], RD),
-             Ctx};
-        throw:{invalid_field_name, Field} ->
-            {true,
-             error_response("Invalid map field name '~s'~n", [Field], RD),
-             Ctx};
-        throw:invalid_utf8 ->
-            {true,
-             error_response("Malformed JSON submitted, invalid UTF-8", RD),
-             Ctx};
-        _Other:Reason ->
-            {true,
-             error_response("Couldn't decode JSON: ~p~n", [Reason], RD),
-             Ctx}
-    end;
-malformed_request(RD, Ctx) ->
-    malformed_rw_params(RD, Ctx).
-
-malformed_rw_params(RD, Ctx) ->
-    Res = lists:foldl(fun malformed_rw_param/2,
-                      {false, RD, Ctx},
-                      [{#ctx.r,  "r",  "default"},
-                       {#ctx.w,  "w",  "default"},
-                       {#ctx.dw, "dw", "default"},
-                       {#ctx.pw, "pw", "default"},
-                       {#ctx.pr, "pr", "default"}]),
-    Res1 = lists:foldl(fun malformed_boolean_param/2,
-                       Res,
-                       [{#ctx.basic_quorum,    "basic_quorum",    "default"},
-                        {#ctx.notfound_ok,     "notfound_ok",     "default"},
-                        {#ctx.include_context, "include_context", "true"},
-                        {#ctx.returnbody,      "returnbody",      "false"}]),
-    malformed_timeout_param(Res1).
-
-malformed_rw_param({Idx, Name, Default}, {Result, RD, Ctx}) ->
-    case catch normalize_rw_param(wrq:get_qs_value(Name, Default, RD)) of
-        P when (is_atom(P) orelse is_integer(P)) ->
-            {Result, RD, setelement(Idx, Ctx, P)};
-        _ ->
-            {true,
-             error_response("~s query parameter must be an integer or "
-                            "one of the following words: 'one', 'quorum' or 'all'~n",
-                            [Name], RD),
-             Ctx}
-    end.
-
-malformed_boolean_param({Idx, Name, Default}, {Result, RD, Ctx}) ->
-    case string:to_lower(wrq:get_qs_value(Name, Default, RD)) of
-        "true" ->
-            {Result, RD, setelement(Idx, Ctx, true)};
-        "false" ->
-            {Result, RD, setelement(Idx, Ctx, false)};
-        "default" ->
-            {Result, RD, setelement(Idx, Ctx, default)};
-        _ ->
-            {true,
-             error_response("~s query parameter must be true or false~n",
-                            [Name], RD),
-             Ctx}
-    end.
-
-malformed_timeout_param({Result, RD, Ctx}) ->
-    case wrq:get_qs_value("timeout", undefined, RD) of
-        undefined ->
-            {Result, RD, Ctx};
-        TimeoutStr when is_list(TimeoutStr) ->
-            try
-                Timeout = list_to_integer(TimeoutStr),
-                {Result, RD, Ctx#ctx{timeout=Timeout}}
-            catch
-                error:badarg ->
-                    {true,
-                     error_response("timeout query parameter must be an "
-                                    "integer, ~s is invalid~n", [TimeoutStr], RD),
-                     Ctx}
-            end
-    end.
-
 content_types_provided(RD, Ctx) ->
     {[{"application/json", produce_json}], RD, Ctx}.
 
@@ -377,36 +350,66 @@ resource_exists(RD, Ctx=#ctx{client=C, bucket_type=T, bucket=B, key=K}) ->
             handle_common_error(Reason, RD, Ctx)
     end.
 
-process_post(RD0, Ctx0=#ctx{client=C, bucket_type=T, bucket=B, module=Mod,
-                            data={_Type,Op,OpCtx}}) ->
-    {RD, Ctx} = maybe_generate_key(RD0, Ctx0),
-    K = Ctx#ctx.key,
-    O = riak_kv_crdt:new({T, B}, K, Mod),
-    Options0 = make_options(Ctx),
-    CrdtOp = make_operation(Mod, Op, OpCtx),
-    Options = [{crdt_op, CrdtOp},
-               {retry_put_coordinator_failure,false}|Options0],
-    case C:put(O, Options) of
-        ok ->
-            {true, RD, Ctx};
-        {ok, RObj} ->
-            {Body, RD1, Ctx1} = produce_json(RD, Ctx#ctx{data=RObj}),
-            {true,
-             wrq:set_resp_body(Body, wrq:set_resp_header(
-                                       ?HEAD_CTYPE,"application/json", RD1)),
-             Ctx1};
-        {error, Reason} ->
-            handle_common_error(Reason, RD, Ctx)
+process_post(RD0, Ctx0=#ctx{client=C, bucket_type=T, bucket=B, module=Mod}) ->
+    case check_post_body(RD0, Ctx0) of
+        {error, RD} ->
+            {{halt, 400}, RD, Ctx0};
+        {ok, {_Type, Op, OpCtx}} ->
+            {RD, Ctx} = maybe_generate_key(RD0, Ctx0),
+            K = Ctx#ctx.key,
+            O = riak_kv_crdt:new({T, B}, K, Mod),
+            Options0 = make_options(Ctx),
+            CrdtOp = make_operation(Mod, Op, OpCtx),
+            Options = [{crdt_op, CrdtOp},
+                       {retry_put_coordinator_failure,false}|Options0],
+            case C:put(O, Options) of
+                ok ->
+                    {true, RD, Ctx};
+                {ok, RObj} ->
+                    {Body, RD1, Ctx1} = produce_json(RD, Ctx#ctx{data=RObj}),
+                    {true,
+                     wrq:set_resp_body(Body, wrq:set_resp_header(
+                                               ?HEAD_CTYPE, "application/json",
+                                               RD1)),
+                     Ctx1};
+                {error, Reason} ->
+                    handle_common_error(Reason, RD, Ctx)
+            end
     end.
 
 produce_json(RD, Ctx=#ctx{module=Mod, data=RObj, include_context=I}) ->
-    Type = riak_kv_crdt:to_type(Mod),
-    {RespCtx, Value} = riak_kv_crdt:value(RObj, Type),
+    Type = riak_kv_crdt:from_mod(Mod),
+    {RespCtx, Value} = riak_kv_crdt:value(RObj, Mod),
     Body = riak_kv_crdt_json:fetch_response_to_json(
                      Type, Value, get_context(RespCtx,I), ?MOD_MAP),
-    {Body, RD, Ctx}.
+    {mochijson2:encode(Body), RD, Ctx}.
 
 %% Internal functions
+
+check_post_body(RD, #ctx{module=Mod}) ->
+    CRDTType = riak_kv_crdt:from_mod(Mod),
+    try
+        JSON = mochijson2:decode(wrq:req_body(RD)),
+        Data = {CRDTType, Op, Context} =
+            riak_kv_crdt_json:update_request_from_json(CRDTType, JSON,
+                                                       ?MOD_MAP),
+        {ok, Data}
+    catch
+        throw:{invalid_operation, {BadType, BadOp}} ->
+            {error,
+             error_response("Invalid operation on datatype '~s': ~s~n",
+                            [BadType, mochijson2:encode(BadOp)], RD)};
+        throw:{invalid_field_name, Field} ->
+            {error,
+             error_response("Invalid map field name '~s'~n", [Field], RD)};
+        throw:invalid_utf8 ->
+            {error,
+             error_response("Malformed JSON submitted, invalid UTF-8", RD)};
+        _Other:Reason ->
+            {error,
+             error_response("Couldn't decode JSON: ~p~n", [Reason], RD)}
+    end.
+
 
 %% @doc Converts a query string value into a quorum value.
 normalize_rw_param("default") -> default;
@@ -483,7 +486,7 @@ path_segment_to_bin(Key, RD) ->
     case Segment of
         undefined -> undefined;
         _ ->
-            list_to_binary(riak_kv_wm_utils:maybe_decode_uri(Segment, RD))
+            list_to_binary(riak_kv_wm_utils:maybe_decode_uri(RD, Segment))
     end.
 
 %% @doc If the key is not submitted on POST, generate a key and set
