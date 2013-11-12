@@ -242,8 +242,7 @@ encode_fetch_response_test_() ->
               {ok, Counter} = ?COUNTER_TYPE:update({increment, 5}, a, ?COUNTER_TYPE:new()),
               ?assertEqual({struct, [{<<"type">>,<<"counter">>},
                                      {<<"value">>, 5}]},
-                           fetch_response_to_json(counter, ?COUNTER_TYPE:value(Counter), undefined, ?MOD_MAP))
-
+                           fetch_response_to_json(counter, ?COUNTER_TYPE:value(Counter), undefined, ?MOD_MAP)),
               ?assertEqual({struct, [{<<"type">>,<<"counter">>},
                                      {<<"value">>, 5}]},
                            fetch_response_to_json(counter, ?COUNTER_TYPE:value(Counter), <<>>, ?MOD_MAP))
