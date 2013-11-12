@@ -137,7 +137,7 @@
           method,
           timeout,
           security
-       }).
+         }).
 -include("riak_kv_wm_raw.hrl").
 -include("riak_kv_types.hrl").
 
@@ -150,11 +150,9 @@
          allowed_methods/2,
          content_types_provided/2,
          encodings_provided/2,
-         process_post/2
-        ]).
-
--export([
-          produce_json/2
+         resource_exists/2,
+         process_post/2,           %% POST handler
+         produce_json/2,           %% GET/HEAD handler
         ]).
 
 -include_lib("webmachine/include/webmachine.hrl").
@@ -223,8 +221,18 @@ forbidden_check_bucket_type(RD, Ctx) ->
     end.
 
 forbidden_check_crdt_type(RD, Ctx=#ctx{bucket_type = <<"default">>,
+                                       bucket=B0,
+                                       key=K0,
                                        crdt_type="counters"}) ->
-    {false, RD, Ctx#ctx{module=riak_kv_crdt:to_mod("counters")}};
+    B = mochiweb_util:quote_plus(B0),
+    K = mochiweb_util:quote_plus(K),
+    CountersUrl = lists:flatten(
+                    io_lib:format("/buckets/~s/counters/~s",[B, K])),
+    halt_with_message(301,
+                      "Counters in the default bucket-type should use the "
+                      "legacy URL\n",
+                      wrq:set_resp_header("Location", CountersUrl, RD),
+                      Ctx);
 forbidden_check_crdt_type(RD, Ctx=#ctx{bucket_type = <<"default">>,
                                        crdt_type=Other}) ->
     {true, error_response("Data type '~s' is not allowed in the default "
@@ -245,8 +253,8 @@ forbidden_check_crdt_type(RD, Ctx=#ctx{bucket_type=T, bucket=B, crdt_type=C}) ->
                                           "supported type.~n", [C], RD), Ctx};
                 {_, _, false} ->
                     {true,
-                     error_response("Bucket type '~s' uses '~s', but '~s' was "
-                                    "requested", [T, DataType, C], RD),
+                     error_response("Bucket '~s' uses datatype '~s', but '~s' "
+                                    "was requested", [B, DataType, C], RD),
                      Ctx};
                 {_, _, true} ->
                     {false, RD, Ctx#ctx{module=Mod}}
@@ -288,18 +296,19 @@ malformed_request(RD, Ctx) ->
 
 malformed_rw_params(RD, Ctx) ->
     Res = lists:foldl(fun malformed_rw_param/2,
-                {false, RD, Ctx},
-                [{#ctx.r,  "r",  "default"},
-                 {#ctx.w,  "w",  "default"},
-                 {#ctx.dw, "dw", "default"},
-                 {#ctx.pw, "pw", "default"},
-                 {#ctx.pr, "pr", "default"}]),
-    lists:foldl(fun malformed_boolean_param/2,
-                Res,
-                [{#ctx.basic_quorum,    "basic_quorum",    "default"},
-                 {#ctx.notfound_ok,     "notfound_ok",     "default"},
-                 {#ctx.include_context, "include_context", "true"},
-                 {#ctx.returnbody,      "returnbody",      "false"}]).
+                      {false, RD, Ctx},
+                      [{#ctx.r,  "r",  "default"},
+                       {#ctx.w,  "w",  "default"},
+                       {#ctx.dw, "dw", "default"},
+                       {#ctx.pw, "pw", "default"},
+                       {#ctx.pr, "pr", "default"}]),
+    Res1 = lists:foldl(fun malformed_boolean_param/2,
+                       Res,
+                       [{#ctx.basic_quorum,    "basic_quorum",    "default"},
+                        {#ctx.notfound_ok,     "notfound_ok",     "default"},
+                        {#ctx.include_context, "include_context", "true"},
+                        {#ctx.returnbody,      "returnbody",      "false"}]),
+    malformed_timeout_param(Res1).
 
 malformed_rw_param({Idx, Name, Default}, {Result, RD, Ctx}) ->
     case catch normalize_rw_param(wrq:get_qs_value(Name, Default, RD)) of
@@ -328,12 +337,74 @@ malformed_boolean_param({Idx, Name, Default}, {Result, RD, Ctx}) ->
              Ctx}
     end.
 
+malformed_timeout_param({Result, RD, Ctx}) ->
+    case wrq:get_qs_value("timeout", undefined, RD) of
+        undefined ->
+            {Result, RD, Ctx};
+        TimeoutStr when is_list(TimeoutStr) ->
+            try
+                Timeout = list_to_integer(TimeoutStr),
+                {Result, RD, Ctx#ctx{timeout=Timeout}}
+            catch
+                error:badarg ->
+                    {true,
+                     error_response("timeout query parameter must be an "
+                                    "integer, ~s is invalid~n", [TimeoutStr], RD),
+                     Ctx}
+            end
+    end.
+
 content_types_provided(RD, Ctx) ->
     {[{"application/json", produce_json}], RD, Ctx}.
 
 encodings_provided(RD, Ctx) ->
     {riak_kv_wm_utils:default_encodings(), RD, Ctx}.
 
+resource_exists(RD, Ctx=#ctx{method='POST'}) ->
+    %% When submitting an operation, the resource always exists, even
+    %% if key is unspecified.
+    {true, RD, Ctx};
+resource_exists(RD, Ctx=#ctx{key=undefined}) ->
+    %% When fetching, if the key does not exist, we should give a not
+    %% found.
+    {false, RD, Ctx};
+resource_exists(RD, Ctx=#ctx{client=C, bucket_type=T, bucket=B, key=K}) ->
+    Options = make_options(Ctx),
+    case C:get({T,B}, K, Options) of
+        {ok, O} ->
+            {true, RD, Ctx#ctx{data=O}};
+        {error, Reason} ->
+            handle_common_error(Reason, RD, Ctx)
+    end.
+
+process_post(RD0, Ctx0=#ctx{client=C, bucket_type=T, bucket=B, module=Mod,
+                            data={Type,Op,OpCtx}, include_context=I}) ->
+    {RD, Ctx} = maybe_generate_key(RD0, Ctx0),
+    K = Ctx#ctx.key,
+    O = riak_kv_crdt:new({T, B}, K, Mod),
+    Options0 = make_options(Ctx),
+    CrdtOp = make_operation(Mod, Op, OpCtx),
+    Options = [{crdt_op, CrdtOp},
+               {retry_put_coordinator_failure,false}|Options0],
+    case C:put(O, Options) of
+        ok ->
+            {true, RD, Ctx};
+        {ok, RObj} ->
+            {Body, RD1, Ctx1} = produce_json(RD, Ctx#ctx{data=RObj}),
+            {true,
+             wrq:set_resp_body(Body, wrq:set_resp_header(
+                                       ?HEAD_CTYPE,"application/json", RD1)),
+             Ctx1}
+        {error, Reason} ->
+            handle_common_error(Reason, RD, Ctx)
+    end.
+
+produce_json(RD, Ctx=#ctx{module=Mod, data=RObj, include_context=I}) ->
+    Type = riak_kv_crdt:to_type(Mod),
+    {RespCtx, Value} = riak_kv_crdt:value(RObj, Type),
+    Body = riak_kv_crdt_json:fetch_response_to_json(
+                     Type, Value, get_context(RespCtx,I), ?MOD_MAP),
+    {Body, RD, Ctx};
 
 %% Internal functions
 
@@ -379,7 +450,7 @@ handle_common_error(Reason, RD, Ctx) ->
             halt_with_message(404, "not found\n", RD, Ctx);
         bucket_type_unknown ->
             halt_with_message(404, "Unknown bucket type: ~s~n",
-                         [Ctx#ctx.bucket_type], RD, Ctx);
+                              [Ctx#ctx.bucket_type], RD, Ctx);
         {deleted, _VClock} ->
             halt_with_message(404, "not found\n",
                               wrq:set_resp_header(?HEAD_DELETED, "true", RD),
@@ -390,16 +461,16 @@ handle_common_error(Reason, RD, Ctx) ->
                               "value of ~p~n",[N], RD, Ctx);
         {r_val_unsatisfied, Requested, Returned} ->
             halt_with_message(503, "R-value unsatisfied: ~p/~p~n",
-                         [Returned, Requested], RD, Ctx);
+                              [Returned, Requested], RD, Ctx);
         {dw_val_unsatisfied, DW, NumDW} ->
             halt_with_message(503, "DW-value unsatisfied: ~p/~p~n", [NumDW, DW],
                               RD, Ctx);
         {pr_val_unsatisfied, Requested, Returned} ->
             halt_with_message(503, "PR-value unsatisfied: ~p/~p~n",
-                         [Returned, Requested], RD, Ctx);
+                              [Returned, Requested], RD, Ctx);
         {pw_val_unsatisfied, Requested, Returned} ->
             halt_with_message(503, "PW-value unsatisfied: ~p/~p~n",
-                         [Returned, Requested], RD, Ctx);
+                              [Returned, Requested], RD, Ctx);
         failed ->
             halt_with_message(412, "", RD, Ctx);
         Err ->
@@ -417,10 +488,32 @@ path_segment_to_bin(Key, RD) ->
 
 %% @doc If the key is not submitted on POST, generate a key and set
 %% the appropriate redirect location.
-maybe_generate_key(RD, Ctx=#ctx{api_version=V, bucket_type=T, bucket=B, key=undefined}) ->
+maybe_generate_key(RD, Ctx=#ctx{api_version=V, bucket_type=T, bucket=B,
+                                key=undefined}) ->
     K = riak_core_util:unique_id_62(),
     {wrq:set_resp_header("Location",
                          riak_kv_wm_utils:format_uri(T, B, K, undefined, V), RD),
      Ctx#ctx{key=list_to_binary(K)}};
 maybe_generate_key(RD, Ctx) ->
     {RD, Ctx}.
+
+make_operation(Mod, Op, Ctx) ->
+    #crdt_op{mod=Mod, op=Op, ctx=Ctx}.
+
+get_context(_Ctx, false) ->
+    undefined;
+get_context(Ctx, true) ->
+    Ctx.
+
+make_options(Ctx) ->
+    OptList = [{r, Ctx#ctx.r},
+               {w, Ctx#ctx.w},
+               {dw, Ctx#ctx.dw},
+               {rw, Ctx#ctx.rw},
+               {pr, Ctx#ctx.pr},
+               {pw, Ctx#ctx.pw},
+               {basic_quorum, Ctx#ctx.basic_quorum},
+               {notfound_ok, Ctx#ctx.notfound_ok},
+               {timeout, Ctx#ctx.timeout},
+               {returnbody, Ctx#ctx.returnbody}],
+    [ {K,V} || {K,V} <- OptList, V /= default, V /= undefined ].
