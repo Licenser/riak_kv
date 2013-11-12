@@ -152,7 +152,7 @@
          encodings_provided/2,
          resource_exists/2,
          process_post/2,           %% POST handler
-         produce_json/2,           %% GET/HEAD handler
+         produce_json/2           %% GET/HEAD handler
         ]).
 
 -include_lib("webmachine/include/webmachine.hrl").
@@ -225,7 +225,7 @@ forbidden_check_crdt_type(RD, Ctx=#ctx{bucket_type = <<"default">>,
                                        key=K0,
                                        crdt_type="counters"}) ->
     B = mochiweb_util:quote_plus(B0),
-    K = mochiweb_util:quote_plus(K),
+    K = mochiweb_util:quote_plus(K0),
     CountersUrl = lists:flatten(
                     io_lib:format("/buckets/~s/counters/~s",[B, K])),
     halt_with_message(301,
@@ -378,7 +378,7 @@ resource_exists(RD, Ctx=#ctx{client=C, bucket_type=T, bucket=B, key=K}) ->
     end.
 
 process_post(RD0, Ctx0=#ctx{client=C, bucket_type=T, bucket=B, module=Mod,
-                            data={Type,Op,OpCtx}, include_context=I}) ->
+                            data={_Type,Op,OpCtx}}) ->
     {RD, Ctx} = maybe_generate_key(RD0, Ctx0),
     K = Ctx#ctx.key,
     O = riak_kv_crdt:new({T, B}, K, Mod),
@@ -394,7 +394,7 @@ process_post(RD0, Ctx0=#ctx{client=C, bucket_type=T, bucket=B, module=Mod,
             {true,
              wrq:set_resp_body(Body, wrq:set_resp_header(
                                        ?HEAD_CTYPE,"application/json", RD1)),
-             Ctx1}
+             Ctx1};
         {error, Reason} ->
             handle_common_error(Reason, RD, Ctx)
     end.
@@ -404,7 +404,7 @@ produce_json(RD, Ctx=#ctx{module=Mod, data=RObj, include_context=I}) ->
     {RespCtx, Value} = riak_kv_crdt:value(RObj, Type),
     Body = riak_kv_crdt_json:fetch_response_to_json(
                      Type, Value, get_context(RespCtx,I), ?MOD_MAP),
-    {Body, RD, Ctx};
+    {Body, RD, Ctx}.
 
 %% Internal functions
 
